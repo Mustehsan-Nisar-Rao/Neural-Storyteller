@@ -5,6 +5,7 @@ import torch
 from torchvision import models, transforms
 from PIL import Image
 import torch.nn.functional as F
+import torch.nn as nn
 from model import Encoder, Decoder, ImageCaptioningModel
 from tokenizers import Tokenizer, models, pre_tokenizers, decoders, processors
 
@@ -38,26 +39,39 @@ eos_id = tokenizer.token_to_id('</s>') if tokenizer.token_to_id('</s>') is not N
 # Device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Load state_dict
-state_dict = torch.load('best_image_captioning_model.1.pth', map_location=device)
-
-# Infer hyperparameters from state_dict
-hidden_size = state_dict['encoder.fc.weight'].shape[0]
-embed_size = state_dict['decoder.embed.weight'].shape[1]
-vocab_size = state_dict['decoder.embed.weight'].shape[0]
-
-# Infer num_layers by checking for layered keys
-num_layers = 0
-while f'decoder.lstm.weight_ih_l{num_layers}' in state_dict:
-    num_layers += 1
+# Load the saved file
+loaded = torch.load('best_image_captioning_model.1.pth', map_location=device)
 
 dropout = 0.3  # Default from provided code
 
-# Create model
-encoder = Encoder(input_size=2048, hidden_size=hidden_size).to(device)
-decoder = Decoder(embed_size=embed_size, hidden_size=hidden_size, vocab_size=vocab_size, num_layers=num_layers, dropout=dropout, pad_id=pad_id).to(device)
-model = ImageCaptioningModel(encoder, decoder).to(device)
-model.load_state_dict(state_dict)
+if isinstance(loaded, dict):
+    state_dict = loaded
+    # Remove 'module.' prefix if present
+    if next(iter(state_dict)).startswith('module.'):
+        state_dict = {k.replace('module.', ''): k for k, v in state_dict.items()}
+    # Infer hyperparameters from state_dict
+    hidden_size = state_dict['encoder.fc.weight'].shape[0]
+    embed_size = state_dict['decoder.embed.weight'].shape[1]
+    vocab_size = state_dict['decoder.embed.weight'].shape[0]
+    # Infer num_layers
+    num_layers = 0
+    while f'decoder.lstm.weight_ih_l{num_layers}' in state_dict:
+        num_layers += 1
+    # Create model
+    encoder = Encoder(input_size=2048, hidden_size=hidden_size).to(device)
+    decoder = Decoder(embed_size=embed_size, hidden_size=hidden_size, vocab_size=vocab_size, num_layers=num_layers, dropout=dropout, pad_id=pad_id).to(device)
+    model = ImageCaptioningModel(encoder, decoder).to(device)
+    model.load_state_dict(state_dict)
+else:
+    # Assume it's the full model
+    model = loaded.to(device)
+    # Infer hyperparameters from model (optional, but for consistency)
+    hidden_size = model.encoder.fc.out_features
+    embed_size = model.decoder.embed.embedding_dim
+    vocab_size = model.decoder.embed.num_embeddings
+    num_layers = model.decoder.lstm.num_layers
+    dropout = model.decoder.dropout.p
+
 model.eval()
 
 # Transform
