@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
 
 class Encoder(nn.Module):
     def __init__(self, input_size=2048, hidden_size=512):
@@ -14,6 +14,7 @@ class Encoder(nn.Module):
         h = out.unsqueeze(0)
         c = torch.zeros_like(h).to(features.device)
         return h, c
+
 
 class Decoder(nn.Module):
     def __init__(self, embed_size, hidden_size, vocab_size, num_layers=1, dropout=0.3, pad_id=0):
@@ -29,6 +30,7 @@ class Decoder(nn.Module):
         out = self.dropout(out)
         out = self.fc(out)
         return out, hidden
+
 
 class ImageCaptioningModel(nn.Module):
     def __init__(self, encoder, decoder):
