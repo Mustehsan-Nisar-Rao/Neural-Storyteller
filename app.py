@@ -146,7 +146,15 @@ def load_model():
     # Load weights
     try:
         checkpoint = torch.load(model_path, map_location=DEVICE)
-        model.load_state_dict(checkpoint)
+        
+        # The checkpoint contains separate encoder and decoder state dicts
+        if 'encoder_state_dict' in checkpoint and 'decoder_state_dict' in checkpoint:
+            encoder.load_state_dict(checkpoint['encoder_state_dict'])
+            decoder.load_state_dict(checkpoint['decoder_state_dict'])
+        else:
+            # Fallback: try loading as combined state dict
+            model.load_state_dict(checkpoint)
+        
         model.to(DEVICE)
         model.eval()
         st.success("✅ Model loaded successfully!")
