@@ -70,7 +70,6 @@ def load_tokenizer():
     import os
     from tokenizers import Tokenizer
     from tokenizers.models import BPE
-    from tokenizers.pre_tokenizers import Whitespace
     
     # Download vocab and merges files
     if not download_file(VOCAB_URL, "hf_bpe-vocab.json"):
@@ -79,17 +78,16 @@ def load_tokenizer():
         return None, None, None, None
     
     try:
-        # Load vocab
+        # Create BPE tokenizer by passing FILENAMES (not the data itself)
+        tokenizer = Tokenizer(BPE(
+            vocab="hf_bpe-vocab.json",
+            merges="hf_bpe-merges.txt",
+            unk_token="<UNK>"
+        ))
+        
+        # Load vocab to get special token IDs
         with open("hf_bpe-vocab.json", 'r') as f:
             vocab = json.load(f)
-        
-        # Load merges and convert to proper format (list of tuples)
-        with open("hf_bpe-merges.txt", 'r') as f:
-            merges_list = [tuple(line.strip().split()) for line in f if line.strip()]
-        
-        # Create BPE tokenizer
-        tokenizer = Tokenizer(BPE(vocab=vocab, merges=merges_list, unk_token="<UNK>"))
-        tokenizer.pre_tokenizer = Whitespace()
         
         # Get special token IDs
         bos_id = vocab.get("<BOS>", 0)
