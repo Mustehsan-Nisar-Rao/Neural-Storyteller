@@ -6,7 +6,6 @@ from PIL import Image
 import json
 import requests
 from model import Encoder, Decoder, ImageCaptioningModel
-from tokenizers import Tokenizer
 
 # Page configuration
 st.set_page_config(
@@ -51,10 +50,11 @@ MERGES_URL = "https://github.com/Mustehsan-Nisar-Rao/Neural-Storyteller/raw/main
 @st.cache_resource
 def download_file(url, filename):
     """Download file if not exists"""
+    import os
     try:
         if not os.path.exists(filename):
             with st.spinner(f"Downloading {filename}..."):
-                response = requests.get(url, timeout=30)
+                response = requests.get(url, timeout=60)
                 response.raise_for_status()
                 with open(filename, 'wb') as f:
                     f.write(response.content)
@@ -66,22 +66,40 @@ def download_file(url, filename):
 
 @st.cache_resource
 def load_tokenizer():
-    """Load BPE tokenizer"""
+    """Load BPE tokenizer using tokenizers library"""
     import os
+    from tokenizers import Tokenizer
+    from tokenizers.models import BPE
+    from tokenizers.pre_tokenizers import Whitespace
     
     # Download vocab and merges files
-    download_file(VOCAB_URL, "hf_bpe-vocab.json")
-    download_file(MERGES_URL, "hf_bpe-merges.txt")
+    if not download_file(VOCAB_URL, "hf_bpe-vocab.json"):
+        return None, None, None, None
+    if not download_file(MERGES_URL, "hf_bpe-merges.txt"):
+        return None, None, None, None
     
-    # Load tokenizer
-    tokenizer = Tokenizer.from_file("hf_bpe-vocab.json")
-    
-    # Get special token IDs
-    bos_id = tokenizer.token_to_id("<BOS>")
-    eos_id = tokenizer.token_to_id("<EOS>")
-    pad_id = tokenizer.token_to_id("<PAD>")
-    
-    return tokenizer, bos_id, eos_id, pad_id
+    try:
+        # Load vocab
+        with open("hf_bpe-vocab.json", 'r') as f:
+            vocab = json.load(f)
+        
+        # Load merges
+        with open("hf_bpe-merges.txt", 'r') as f:
+            merges = [line.strip() for line in f if line.strip()]
+        
+        # Create BPE tokenizer
+        tokenizer = Tokenizer(BPE(vocab=vocab, merges=merges, unk_token="<UNK>"))
+        tokenizer.pre_tokenizer = Whitespace()
+        
+        # Get special token IDs
+        bos_id = vocab.get("<BOS>", 0)
+        eos_id = vocab.get("<EOS>", 1)
+        pad_id = vocab.get("<PAD>", 2)
+        
+        return tokenizer, bos_id, eos_id, pad_id
+    except Exception as e:
+        st.error(f"Error loading tokenizer: {str(e)}")
+        return None, None, None, None
 
 
 @st.cache_resource
@@ -97,7 +115,13 @@ def load_model():
     
     # Load tokenizer
     tokenizer, bos_id, eos_id, pad_id = load_tokenizer()
-    vocab_size = tokenizer.get_vocab_size()
+    if tokenizer is None:
+        return None, None, None
+    
+    # Get vocab size from tokenizer
+    with open("hf_bpe-vocab.json", 'r') as f:
+        vocab = json.load(f)
+    vocab_size = len(vocab)
     
     # Initialize model
     encoder = Encoder(input_size=2048, hidden_size=HIDDEN_SIZE)
@@ -147,6 +171,16 @@ def extract_features(image_tensor, resnet):
     return feature
 
 
+def decode_tokens(tokenizer, token_ids):
+    """Decode token IDs to text"""
+    from tokenizers import Encoding
+    # Remove special tokens and decode
+    tokens = [tid for tid in token_ids if tid not in [0, 1, 2]]  # Remove BOS, EOS, PAD
+    if not tokens:
+        return ""
+    return tokenizer.decode(tokens, skip_special_tokens=True)
+
+
 def generate_caption_greedy(model, feature, tokenizer, bos_id, eos_id, max_len=MAX_LEN):
     """Generate caption using greedy search"""
     model.eval()
@@ -162,7 +196,7 @@ def generate_caption_greedy(model, feature, tokenizer, bos_id, eos_id, max_len=M
                 break
             caption.append(next_token)
     
-    return tokenizer.decode(caption[1:])
+    return decode_tokens(tokenizer, caption[1:])  # Remove BOS
 
 
 def generate_caption_beam(model, feature, tokenizer, bos_id, eos_id, beam_width=BEAM_WIDTH, max_len=MAX_LEN):
@@ -189,7 +223,7 @@ def generate_caption_beam(model, feature, tokenizer, bos_id, eos_id, beam_width=
             sequences = sorted(all_candidates, key=lambda x: x[3], reverse=True)[:beam_width]
     
     best_seq = sequences[0][0]
-    return tokenizer.decode(best_seq[1:])
+    return decode_tokens(tokenizer, best_seq[1:])  # Remove BOS
 
 
 # Main UI
@@ -238,11 +272,11 @@ if uploaded_file is not None:
     
     with col1:
         st.markdown("**Greedy Search:**")
-        st.info(greedy_caption)
+        st.info(greedy_caption if greedy_caption else "No caption generated")
     
     with col2:
         st.markdown("**Beam Search:**")
-        st.success(beam_caption)
+        st.success(beam_caption if beam_caption else "No caption generated")
     
     # Additional info
     with st.expander("ℹ️ About the methods"):
