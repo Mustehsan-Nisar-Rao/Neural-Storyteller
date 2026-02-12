@@ -1,223 +1,101 @@
 import streamlit as st
+import os
+import requests
 import torch
-import torch.nn.functional as F
 from torchvision import models, transforms
 from PIL import Image
-import json
-import requests
+import torch.nn.functional as F
 from model import Encoder, Decoder, ImageCaptioningModel
+from tokenizers import Tokenizer, models, pre_tokenizers, decoders, processors
 
-# Page configuration
-st.set_page_config(
-    page_title="Image Caption Generator",
-    page_icon="🖼️",
-    layout="centered"
-)
+# Download required files if not present
+if not os.path.exists('hf_bpe-vocab.json'):
+    url = 'https://raw.githubusercontent.com/Mustehsan-Nisar-Rao/Neural-Storyteller/main/hf_bpe-vocab.json'
+    r = requests.get(url, allow_redirects=True)
+    open('hf_bpe-vocab.json', 'wb').write(r.content)
 
-# Custom CSS
-st.markdown("""
-    <style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    .sub-header {
-        font-size: 1.2rem;
-        text-align: center;
-        color: #666;
-        margin-bottom: 2rem;
-    }
-    </style>
-""", unsafe_allow_html=True)
+if not os.path.exists('hf_bpe-merges.txt'):
+    url = 'https://raw.githubusercontent.com/Mustehsan-Nisar-Rao/Neural-Storyteller/main/hf_bpe-merges.txt'
+    r = requests.get(url, allow_redirects=True)
+    open('hf_bpe-merges.txt', 'wb').write(r.content)
 
-# Constants
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-EMBED_SIZE = 512
-HIDDEN_SIZE = 512
-NUM_LAYERS = 1
-DROPOUT = 0.3
-MAX_LEN = 30
-BEAM_WIDTH = 3
+if not os.path.exists('best_image_captioning_model.1.pth'):
+    url = 'https://github.com/Mustehsan-Nisar-Rao/Neural-Storyteller/releases/download/v1/best_image_captioning_model.1.pth'
+    r = requests.get(url, allow_redirects=True)
+    open('best_image_captioning_model.1.pth', 'wb').write(r.content)
 
-# URLs for model files
-MODEL_URL = "https://github.com/Mustehsan-Nisar-Rao/Neural-Storyteller/releases/download/v1/best_image_captioning_model.1.pth"
-VOCAB_URL = "https://github.com/Mustehsan-Nisar-Rao/Neural-Storyteller/raw/main/hf_bpe-vocab.json"
+# Load tokenizer
+tokenizer = Tokenizer(models.BPE(vocab='hf_bpe-vocab.json', merges='hf_bpe-merges.txt'))
+tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+tokenizer.decoder = decoders.ByteLevel()
+tokenizer.post_processor = processors.ByteLevel(trim_offsets=False)
 
+# Special tokens with fallbacks to avoid errors
+pad_id = tokenizer.token_to_id('<pad>') if tokenizer.token_to_id('<pad>') is not None else 0
+bos_id = tokenizer.token_to_id('<s>') if tokenizer.token_to_id('<s>') is not None else 1
+eos_id = tokenizer.token_to_id('</s>') if tokenizer.token_to_id('</s>') is not None else 2
 
-@st.cache_resource
-def download_file(url, filename):
-    """Download file if not exists"""
-    import os
-    try:
-        if not os.path.exists(filename):
-            with st.spinner(f"Downloading {filename}..."):
-                response = requests.get(url, timeout=60)
-                response.raise_for_status()
-                with open(filename, 'wb') as f:
-                    f.write(response.content)
-        return True
-    except Exception as e:
-        st.error(f"Error downloading {filename}: {str(e)}")
-        return False
+# Device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# Load state_dict
+state_dict = torch.load('best_image_captioning_model.1.pth', map_location=device)
 
-class SimpleTokenizer:
-    """Simple tokenizer that just uses the vocab for decoding"""
-    def __init__(self, vocab):
-        self.vocab = vocab
-        self.id_to_token = {v: k for k, v in vocab.items()}
-    
-    def decode(self, token_ids, skip_special_tokens=True):
-        """Decode token IDs to text"""
-        tokens = []
-        for tid in token_ids:
-            if tid in self.id_to_token:
-                token = self.id_to_token[tid]
-                # Skip special tokens
-                if skip_special_tokens and token in ['<BOS>', '<EOS>', '<PAD>', '<UNK>']:
-                    continue
-                tokens.append(token)
-        
-        # Join tokens and clean up BPE artifacts
-        text = ''.join(tokens)
-        # Replace common BPE markers
-        text = text.replace('Ġ', ' ')  # GPT-2 style space marker
-        text = text.replace('▁', ' ')  # SentencePiece style space marker
-        text = text.strip()
-        return text
+# Infer hyperparameters from state_dict
+hidden_size = state_dict['encoder.fc.weight'].shape[0]
+embed_size = state_dict['decoder.embed.weight'].shape[1]
+vocab_size = state_dict['decoder.embed.weight'].shape[0]
 
+# Infer num_layers by checking for layered keys
+num_layers = 0
+while f'decoder.lstm.weight_ih_l{num_layers}' in state_dict:
+    num_layers += 1
 
-@st.cache_resource
-def load_tokenizer():
-    """Load simple tokenizer"""
-    import os
-    
-    # Download vocab file
-    if not download_file(VOCAB_URL, "hf_bpe-vocab.json"):
-        return None, None, None, None
-    
-    try:
-        # Load vocab
-        with open("hf_bpe-vocab.json", 'r') as f:
-            vocab = json.load(f)
-        
-        # Create simple tokenizer
-        tokenizer = SimpleTokenizer(vocab)
-        
-        # Get special token IDs
-        bos_id = vocab.get("<BOS>", 0)
-        eos_id = vocab.get("<EOS>", 1)
-        pad_id = vocab.get("<PAD>", 2)
-        
-        return tokenizer, bos_id, eos_id, pad_id
-    except Exception as e:
-        st.error(f"Error loading tokenizer: {str(e)}")
-        return None, None, None, None
+dropout = 0.3  # Default from provided code
 
+# Create model
+encoder = Encoder(input_size=2048, hidden_size=hidden_size).to(device)
+decoder = Decoder(embed_size=embed_size, hidden_size=hidden_size, vocab_size=vocab_size, num_layers=num_layers, dropout=dropout, pad_id=pad_id).to(device)
+model = ImageCaptioningModel(encoder, decoder).to(device)
+model.load_state_dict(state_dict)
+model.eval()
 
-@st.cache_resource
-def load_model():
-    """Load the trained image captioning model"""
-    import os
-    
-    # Download model weights
-    model_path = "best_image_captioning_model.1.pth"
-    if not download_file(MODEL_URL, model_path):
-        st.error("Failed to download model weights")
-        return None, None, None
-    
-    # Load tokenizer
-    tokenizer, bos_id, eos_id, pad_id = load_tokenizer()
-    if tokenizer is None:
-        return None, None, None
-    
-    # Get vocab size from tokenizer
-    with open("hf_bpe-vocab.json", 'r') as f:
-        vocab = json.load(f)
-    vocab_size = len(vocab)
-    
-    # Initialize model
-    encoder = Encoder(input_size=2048, hidden_size=HIDDEN_SIZE)
-    decoder = Decoder(EMBED_SIZE, HIDDEN_SIZE, vocab_size, NUM_LAYERS, DROPOUT, pad_id)
-    model = ImageCaptioningModel(encoder, decoder)
-    
-    # Load weights
-    try:
-        checkpoint = torch.load(model_path, map_location=DEVICE)
-        
-        # The checkpoint contains separate encoder and decoder state dicts
-        if 'encoder_state_dict' in checkpoint and 'decoder_state_dict' in checkpoint:
-            encoder.load_state_dict(checkpoint['encoder_state_dict'])
-            decoder.load_state_dict(checkpoint['decoder_state_dict'])
-        else:
-            # Fallback: try loading as combined state dict
-            model.load_state_dict(checkpoint)
-        
-        model.to(DEVICE)
-        model.eval()
-        st.success("✅ Model loaded successfully!")
-    except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
-        return None, None, None
-    
-    return model, tokenizer, (bos_id, eos_id, pad_id)
+# Transform
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize((0.485, 0.456, 0.406),
+                         (0.229, 0.224, 0.225))
+])
 
+# Pre-trained ResNet50
+resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
+resnet = torch.nn.Sequential(*list(resnet.children())[:-1])  # Remove FC
+resnet = resnet.to(device)
+resnet.eval()
 
-@st.cache_resource
-def load_resnet():
-    """Load pre-trained ResNet50 for feature extraction"""
-    resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
-    resnet = torch.nn.Sequential(*list(resnet.children())[:-1])
-    resnet = resnet.to(DEVICE)
-    resnet.eval()
-    return resnet
-
-
-def preprocess_image(image):
-    """Preprocess image for model input"""
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406),
-                           (0.229, 0.224, 0.225))
-    ])
-    return transform(image).unsqueeze(0).to(DEVICE)
-
-
-def extract_features(image_tensor, resnet):
-    """Extract 2048-dim features using ResNet50"""
-    with torch.no_grad():
-        feature = resnet(image_tensor)
-        feature = feature.squeeze().unsqueeze(0)
-    return feature
-
-
-def generate_caption_greedy(model, feature, tokenizer, bos_id, eos_id, max_len=MAX_LEN):
-    """Generate caption using greedy search"""
+# Caption Generation Functions
+def generate_caption_greedy(model, feature, max_len=30):
     model.eval()
     h, c = model.encoder(feature)
     caption = [bos_id]
-    
+   
     with torch.no_grad():
         for _ in range(max_len):
-            inputs = torch.tensor(caption).unsqueeze(0).to(DEVICE)
+            inputs = torch.tensor(caption).unsqueeze(0).to(device)
             outputs, (h, c) = model.decoder(inputs, (h, c))
             next_token = outputs[0, -1].argmax().item()
             if next_token == eos_id:
                 break
             caption.append(next_token)
-    
-    return tokenizer.decode(caption[1:], skip_special_tokens=True)
+   
+    return tokenizer.decode(caption[1:])  # remove BOS
 
-
-def generate_caption_beam(model, feature, tokenizer, bos_id, eos_id, beam_width=BEAM_WIDTH, max_len=MAX_LEN):
-    """Generate caption using beam search"""
+def generate_caption_beam(model, feature, beam_width=3, max_len=30):
     model.eval()
     h, c = model.encoder(feature)
     sequences = [([bos_id], h, c, 0.0)]
-    
+   
     with torch.no_grad():
         for _ in range(max_len):
             all_candidates = []
@@ -225,7 +103,7 @@ def generate_caption_beam(model, feature, tokenizer, bos_id, eos_id, beam_width=
                 if seq[-1] == eos_id:
                     all_candidates.append((seq, h_seq, c_seq, score))
                     continue
-                inputs = torch.tensor(seq).unsqueeze(0).to(DEVICE)
+                inputs = torch.tensor(seq).unsqueeze(0).to(device)
                 outputs, (h_new, c_new) = model.decoder(inputs, (h_seq, c_seq))
                 log_probs = F.log_softmax(outputs[0, -1], dim=-1)
                 top_log_probs, top_tokens = torch.topk(log_probs, beam_width)
@@ -234,73 +112,27 @@ def generate_caption_beam(model, feature, tokenizer, bos_id, eos_id, beam_width=
                     new_score = score + tok_prob
                     all_candidates.append((new_seq, h_new, c_new, new_score))
             sequences = sorted(all_candidates, key=lambda x: x[3], reverse=True)[:beam_width]
-    
+   
     best_seq = sequences[0][0]
-    return tokenizer.decode(best_seq[1:], skip_special_tokens=True)
+    return tokenizer.decode(best_seq[1:])  # remove BOS
 
-
-# Main UI
-st.markdown('<div class="main-header">🖼️ Image Caption Generator</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Upload an image to generate AI-powered captions</div>', unsafe_allow_html=True)
-
-# Load models
-import os
-model, tokenizer, (bos_id, eos_id, pad_id) = load_model()
-resnet = load_resnet()
-
-if model is None or tokenizer is None:
-    st.error("Failed to load model. Please refresh the page.")
-    st.stop()
-
-# File uploader
-uploaded_file = st.file_uploader(
-    "Choose an image...",
-    type=["jpg", "jpeg", "png"],
-    help="Upload a JPG, JPEG, or PNG image"
-)
+# Streamlit interface
+st.title("Image Captioning App")
+uploaded_file = st.file_uploader("Upload an image for captioning", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
-    # Display uploaded image
-    image = Image.open(uploaded_file).convert('RGB')
+    img = Image.open(uploaded_file).convert('RGB')
+    st.image(img, caption="Uploaded Image", use_column_width=True)
     
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.image(image, caption="Uploaded Image", use_container_width=True)
+    img_tensor = transform(img).unsqueeze(0).to(device)
     
-    # Generate captions
-    with st.spinner("Generating captions..."):
-        # Preprocess and extract features
-        image_tensor = preprocess_image(image)
-        features = extract_features(image_tensor, resnet)
-        
-        # Generate captions
-        greedy_caption = generate_caption_greedy(model, features, tokenizer, bos_id, eos_id)
-        beam_caption = generate_caption_beam(model, features, tokenizer, bos_id, eos_id)
+    with torch.no_grad():
+        feature = resnet(img_tensor)  # [1, 2048, 1, 1]
+        feature = feature.squeeze().unsqueeze(0)  # [1, 2048]
     
-    # Display results
-    st.markdown("---")
-    st.subheader("📝 Generated Captions")
+    greedy_caption = generate_caption_greedy(model, feature)
+    beam_caption = generate_caption_beam(model, feature, beam_width=3)
     
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("**Greedy Search:**")
-        st.info(greedy_caption if greedy_caption else "No caption generated")
-    
-    with col2:
-        st.markdown("**Beam Search:**")
-        st.success(beam_caption if beam_caption else "No caption generated")
-    
-    # Additional info
-    with st.expander("ℹ️ About the methods"):
-        st.markdown("""
-        - **Greedy Search**: Selects the most probable word at each step. Fast but may not find the optimal caption.
-        - **Beam Search**: Explores multiple caption candidates simultaneously. More thorough and typically produces better results.
-        """)
-
-# Footer
-st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: #666;'>Powered by PyTorch & Streamlit</div>",
-    unsafe_allow_html=True
-)
+    st.write("Generated Captions:")
+    st.write("Greedy Caption:", greedy_caption)
+    st.write("Beam Caption:", beam_caption)
