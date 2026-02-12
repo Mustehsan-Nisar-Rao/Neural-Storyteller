@@ -83,12 +83,12 @@ def load_tokenizer():
         with open("hf_bpe-vocab.json", 'r') as f:
             vocab = json.load(f)
         
-        # Load merges
+        # Load merges and convert to proper format (list of tuples)
         with open("hf_bpe-merges.txt", 'r') as f:
-            merges = [line.strip() for line in f if line.strip()]
+            merges_list = [tuple(line.strip().split()) for line in f if line.strip()]
         
         # Create BPE tokenizer
-        tokenizer = Tokenizer(BPE(vocab=vocab, merges=merges, unk_token="<UNK>"))
+        tokenizer = Tokenizer(BPE(vocab=vocab, merges=merges_list, unk_token="<UNK>"))
         tokenizer.pre_tokenizer = Whitespace()
         
         # Get special token IDs
@@ -173,7 +173,6 @@ def extract_features(image_tensor, resnet):
 
 def decode_tokens(tokenizer, token_ids):
     """Decode token IDs to text"""
-    from tokenizers import Encoding
     # Remove special tokens and decode
     tokens = [tid for tid in token_ids if tid not in [0, 1, 2]]  # Remove BOS, EOS, PAD
     if not tokens:
